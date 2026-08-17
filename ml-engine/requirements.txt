@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+pydantic
+pdfplumber
+scikit-learn
+numpy
+sentence-transformers
