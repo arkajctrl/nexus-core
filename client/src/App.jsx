@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Radar, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, ResponsiveContainer, Tooltip } from 'recharts';
 import HalftoneReveal from './HalftoneReveal';
 import PixelBlast from './PixelBlast';
@@ -8,10 +8,10 @@ import './App.css';
 export default function App() {
   // --- AUTH & STATE MANAGEMENT ---
   const [currentUser, setCurrentUser] = useState(() => localStorage.getItem('nexus_user') || null);
-  const [currentView, setCurrentView] = useState(currentUser ? 'home' : 'login'); // 'home', 'analyzer', 'fixit', 'jobs', 'livelogic'
+  const [currentView, setCurrentView] = useState(currentUser ? 'home' : 'login'); 
   const [theme, setTheme] = useState('dark'); 
   
-  // Progress Persistence (Gamification)
+  // Progress Persistence 
   const [userProgress, setUserProgress] = useState(() => {
     const saved = localStorage.getItem(`nexus_progress_${currentUser}`);
     return saved ? JSON.parse(saved) : {};
@@ -28,17 +28,19 @@ export default function App() {
   const [savedJobs, setSavedJobs] = useState([]);
   const [jobTab, setJobTab] = useState('matches'); 
 
-  // LiveLogic Simulation States
+  // LiveLogic States
+  const [interviewMode, setInterviewMode] = useState('soft'); // 'soft' or 'tech'
   const [interviewStarted, setInterviewStarted] = useState(false);
   const [currentQuestionIdx, setCurrentQuestionIdx] = useState(0);
   const [recording, setRecording] = useState(false);
+  const [liveTranscript, setLiveTranscript] = useState("");
+  const [interviewAnswers, setInterviewAnswers] = useState([]);
   const [interviewComplete, setInterviewComplete] = useState(false);
-
-  const interviewQuestions = [
-    "Tell me about a time you had to learn a complex technical stack under a tight deadline.",
-    "How do you handle architectural disagreements within a development team?",
-    "Describe a project where you bridged a critical gap between academic theory and production requirements."
-  ];
+  const [mediaStream, setMediaStream] = useState(null);
+  
+  const recognitionRef = useRef(null);
+  const finalTranscriptRef = useRef(""); 
+  const videoRef = useRef(null);
 
   useEffect(() => {
     if (currentUser) {
@@ -46,11 +48,171 @@ export default function App() {
     }
   }, [userProgress, currentUser]);
 
+  useEffect(() => {
+    if (currentView !== 'livelogic') {
+      stopMedia();
+    }
+  }, [currentView]);
+
   const toggleTheme = () => {
     setTheme(theme === 'dark' ? 'light' : 'dark');
   };
 
-  // --- AUTH LOGIC ---
+  // --- DYNAMIC INTERVIEW QUESTIONS ---
+  const getInterviewQuestions = () => {
+    if (interviewMode === 'tech' && activeFixItSkill) {
+      return [
+        `Can you explain the core architecture and primary use cases of ${activeFixItSkill}?`,
+        `What are some common performance bottlenecks or pitfalls when scaling ${activeFixItSkill} in a production environment?`,
+        `If you had to integrate ${activeFixItSkill} into a legacy monolithic codebase, how would you approach the migration?`
+      ];
+    }
+    return [
+      "Tell me about a time you had to learn a complex technical stack under a tight deadline.",
+      "How do you handle architectural disagreements or debugging roadblocks within a development team?",
+      "Describe a project where you bridged a critical gap between academic theory and production requirements."
+    ];
+  };
+
+  const launchInterview = (mode, skill = null) => {
+    setInterviewMode(mode);
+    if (skill) setActiveFixItSkill(skill);
+    setInterviewStarted(false);
+    setInterviewComplete(false);
+    setCurrentQuestionIdx(0);
+    setInterviewAnswers([]);
+    setLiveTranscript("");
+    finalTranscriptRef.current = "";
+    setCurrentView('livelogic');
+  };
+
+  // --- HARDWARE & PURE SPEECH RECOGNITION LOGIC ---
+  const startCamera = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        video: { width: { ideal: 1280 }, height: { ideal: 720 } }, 
+        audio: true 
+      });
+      setMediaStream(stream);
+      setInterviewStarted(true);
+    } catch (err) {
+      console.error("Camera/Mic access denied:", err);
+      alert("Microphone and Camera access are strictly required for LiveLogic to function.");
+    }
+  };
+
+  const stopMedia = () => {
+    if (mediaStream) {
+      mediaStream.getTracks().forEach(track => track.stop());
+      setMediaStream(null);
+    }
+    if (recognitionRef.current && typeof recognitionRef.current.stop === 'function') {
+      recognitionRef.current.stop();
+      recognitionRef.current = null;
+    }
+    setRecording(false);
+  };
+
+  const startSpeaking = () => {
+    setRecording(true);
+    setLiveTranscript("");
+    finalTranscriptRef.current = "";
+
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    
+    if (SpeechRecognition) {
+      try {
+        const recognition = new SpeechRecognition();
+        recognition.continuous = true;
+        recognition.interimResults = true;
+        recognition.lang = 'en-US';
+
+        recognition.onresult = (event) => {
+          let interimTrans = '';
+          for (let i = event.resultIndex; i < event.results.length; ++i) {
+            if (event.results[i].isFinal) {
+              finalTranscriptRef.current += event.results[i][0].transcript + ' ';
+            } else {
+              interimTrans += event.results[i][0].transcript;
+            }
+          }
+          setLiveTranscript(finalTranscriptRef.current + interimTrans);
+        };
+
+        recognition.onerror = (err) => {
+          console.error("Speech recognition true error:", err.error);
+          setLiveTranscript(`[Microphone Error: ${err.error}. Ensure browser permissions are granted and Shields are down.]`);
+        };
+
+        recognition.start();
+        recognitionRef.current = recognition;
+      } catch (e) {
+        console.error("Speech recognition failed to start:", e);
+        setLiveTranscript(`[System Error: Failed to start transcription engine.]`);
+      }
+    } else {
+      setLiveTranscript("[Error: Web Speech API is completely unsupported in this specific browser.]");
+    }
+  };
+
+  const handleStopRecording = () => {
+    if (recognitionRef.current && typeof recognitionRef.current.stop === 'function') {
+      recognitionRef.current.stop();
+      recognitionRef.current = null;
+    }
+    setRecording(false);
+    
+    const questions = getInterviewQuestions();
+    // Use exactly what the user spoke, nothing else.
+    const finalAnswer = finalTranscriptRef.current.trim() || liveTranscript.trim() || "";
+    
+    const updatedAnswers = [...interviewAnswers, { question: questions[currentQuestionIdx], answer: finalAnswer }];
+    setInterviewAnswers(updatedAnswers);
+
+    if (currentQuestionIdx < questions.length - 1) {
+      setCurrentQuestionIdx(prev => prev + 1);
+      setLiveTranscript("");
+      finalTranscriptRef.current = "";
+    } else {
+      stopMedia();
+      setInterviewComplete(true);
+    }
+  };
+
+  // --- DYNAMIC AI SPEECH EVALUATOR ---
+  const calculateInterviewMetrics = () => {
+    const totalWords = interviewAnswers.reduce((acc, curr) => acc + curr.answer.split(/\s+/).filter(Boolean).length, 0);
+    const combinedText = interviewAnswers.map(a => a.answer.toLowerCase()).join(" ");
+
+    let keywords = ["team", "scale", "performance", "debug", "architecture", "data", "system", "communicate", "agile", "optimizing", "codebase"];
+    if (interviewMode === 'tech' && activeFixItSkill) {
+      keywords.push(activeFixItSkill.toLowerCase(), "api", "database", "deploy", "server", "cloud", "code", "repo");
+    }
+
+    const matchedKeywords = keywords.filter(kw => combinedText.includes(kw));
+
+    let score = 0; 
+    
+    if (totalWords === 0) {
+      score = 0; // If they say nothing, they get a 0. No fake participation trophies.
+    } else {
+      score = 40; // Base score for actually speaking
+      if (totalWords > 50) score += 20;
+      else if (totalWords > 20) score += 10;
+      score += Math.min(30, matchedKeywords.length * 6);
+    }
+    
+    score = Math.min(100, score); 
+
+    return {
+      score,
+      totalWords,
+      matchedKeywords,
+      clarity: score === 0 ? "Failed to provide input" : score > 80 ? "Optimal (Structured Delivery)" : score > 60 ? "Stable (Moderate Cohesion)" : "Fragmented (Needs Expansion)"
+    };
+  };
+
+  // --- STANDARD LOGIC ---
   const handleLogin = (e) => {
     e.preventDefault();
     const username = e.target.username.value.trim();
@@ -68,10 +230,10 @@ export default function App() {
     setCurrentUser(null);
     setUserProgress({});
     setResults(null);
+    stopMedia();
     setCurrentView('login');
   };
 
-  // --- GAMIFICATION LOGIC ---
   const toggleProgress = (skill, week) => {
     setUserProgress(prev => {
       const skillProgress = prev[skill] || [];
@@ -85,7 +247,6 @@ export default function App() {
     });
   };
 
-  // --- ANALYZER LOGIC ---
   const handleFileDrop = (e) => {
     e.preventDefault();
     const droppedFile = e.dataTransfer.files[0];
@@ -127,7 +288,6 @@ export default function App() {
     });
   };
 
-  // --- HELPER FUNCTIONS ---
   const generateRadarData = () => {
     if (!results) return [];
     
@@ -451,10 +611,10 @@ export default function App() {
                       </button>
                     )}
                     <button 
-                      onClick={() => setCurrentView('livelogic')}
+                      onClick={() => launchInterview('soft')} // Always Soft Skills Mode from here
                       className={`w-full py-4 font-bold text-lg uppercase tracking-widest border-4 transition-all duration-300 hover:-translate-y-1 ${theme === 'dark' ? 'bg-[#E8F1F2] text-[#001A23] border-[#E8F1F2] shadow-[4px_4px_0px_0px_rgba(232,241,242,1)]' : 'bg-[#B3EFB2] text-[#001A23] border-[#001A23] shadow-[4px_4px_0px_0px_rgba(0,26,35,1)]'}`}
                     >
-                      Test Skills
+                      Test Soft Skills
                     </button>
                     <button 
                       onClick={() => setCurrentView('jobs')}
@@ -474,6 +634,8 @@ export default function App() {
 
   const renderFixItPage = () => {
     const plan = generateFixItPlan(activeFixItSkill);
+    const completedWeeks = (userProgress[activeFixItSkill] || []).length;
+    const isSkillFullyCompleted = completedWeeks === 4;
 
     return (
       <div className="flex-1 flex flex-col items-center justify-center p-6 w-full max-w-[1400px] mx-auto relative z-10 animate-fade-in-up">
@@ -580,6 +742,19 @@ export default function App() {
                       </div>
                     </div>
                   </div>
+
+                  {/* DYNAMIC TECH INTERVIEW BUTTON (ONLY APPEARS AT 4/4 PROGRESS) */}
+                  {isSkillFullyCompleted && (
+                    <div className="pt-6 border-t-4 border-dashed opacity-90 border-green-500 animate-fade-in-up">
+                       <button 
+                          onClick={() => launchInterview('tech', activeFixItSkill)} 
+                          className={`w-full py-5 font-bold text-2xl uppercase tracking-widest border-4 transition-all duration-300 hover:-translate-y-1 ${theme === 'dark' ? 'bg-[#E8F1F2] text-[#001A23] border-[#E8F1F2] shadow-[6px_6px_0px_0px_rgba(232,241,242,1)]' : 'bg-[#B3EFB2] text-[#001A23] border-[#001A23] shadow-[6px_6px_0px_0px_rgba(0,26,35,1)]'}`}
+                        >
+                          Initiate Technical Assessment: {activeFixItSkill}
+                        </button>
+                    </div>
+                  )}
+
                 </div>
               )}
             </div>
@@ -589,107 +764,157 @@ export default function App() {
     );
   };
 
-  // --- NEW: LIVELOGIC INTEGRATED INTERVIEW FEATURE ---
+  // --- LIVELOGIC: TWO MODES WITH LIVE TRANSCRIPTION & DYNAMIC EVALUATION ---
   const renderLiveLogicPage = () => {
+    const questions = getInterviewQuestions();
+    const metrics = interviewComplete ? calculateInterviewMetrics() : null;
+
     return (
-      <div className="flex-1 flex flex-col items-center justify-start p-6 w-full max-w-5xl mx-auto relative z-10 animate-fade-in-up mt-6">
+      <div className="flex-1 flex flex-col items-center justify-start p-6 w-full max-w-6xl mx-auto relative z-10 animate-fade-in-up mt-6">
         <div className={`w-full p-8 border-[4px] backdrop-blur-lg ${theme === 'dark' ? 'bg-[#001A23]/95 border-[#B3EFB2] shadow-[12px_12px_0px_0px_rgba(179,239,178,1)]' : 'bg-[#E8F1F2]/95 border-[#001A23] shadow-[12px_12px_0px_0px_rgba(0,26,35,1)]'}`}>
           <div className={`flex justify-between items-center mb-8 border-b-4 pb-4 transition-colors duration-300 ${theme === 'dark' ? 'border-[#B3EFB2]' : 'border-[#001A23]'}`}>
-            <h2 className={`text-4xl font-bold uppercase tracking-widest ${theme === 'dark' ? 'text-[#E8F1F2]' : 'text-[#001A23]'}`}>LiveLogic // AI Soft-Skill Interviewer</h2>
+            <h2 className={`text-4xl font-bold uppercase tracking-widest ${theme === 'dark' ? 'text-[#E8F1F2]' : 'text-[#001A23]'}`}>
+              {interviewMode === 'tech' ? `LiveLogic // Technical Assessment: ${activeFixItSkill}` : 'LiveLogic // AI Soft-Skill Assessment'}
+            </h2>
             <button 
-              onClick={() => setCurrentView('analyzer')}
+              onClick={() => { stopMedia(); setCurrentView(interviewMode === 'tech' ? 'fixit' : 'analyzer'); }}
               className={`text-xl font-bold uppercase tracking-widest transition-colors duration-300 ${theme === 'dark' ? 'text-[#E8F1F2] hover:text-[#B3EFB2]' : 'text-[#001A23] hover:text-[#B3EFB2]'}`}
             >
-              &larr; Back to Analyzer
+              &larr; Abort Assessment
             </button>
           </div>
 
           {!interviewStarted && !interviewComplete && (
             <div className="text-center py-16 space-y-8">
               <h3 className={`text-4xl font-bold uppercase tracking-widest ${theme === 'dark' ? 'text-[#B3EFB2]' : 'text-[#001A23]'}`}>
-                Ready to calibrate your verbal and behavioral metrics?
+                Ready to calibrate your {interviewMode === 'tech' ? 'technical vocabulary' : 'behavioral metrics'}?
               </h3>
-              <p className={`text-2xl max-w-2xl mx-auto ${theme === 'dark' ? 'text-[#E8F1F2]' : 'text-[#001A23]'}`}>
-                LiveLogic analyzes your delivery cadence, keyword usage, and conceptual confidence for target role: <span className="underline font-bold">{results?.target_role || "Software Engineer"}</span>.
+              <p className={`text-2xl max-w-3xl mx-auto leading-relaxed ${theme === 'dark' ? 'text-[#E8F1F2]' : 'text-[#001A23]'}`}>
+                {interviewMode === 'tech' 
+                  ? `LiveLogic activates real-time speech recognition to evaluate your architectural logic and depth of knowledge regarding ${activeFixItSkill}.` 
+                  : `LiveLogic analyzes your delivery cadence, keyword usage, and conceptual confidence for target role: ${results?.target_role || "Software Engineer"}.`}
               </p>
               <button 
-                onClick={() => setInterviewStarted(true)}
+                onClick={startCamera}
                 className={`px-12 py-5 font-bold text-3xl uppercase tracking-widest border-4 transition-all duration-300 hover:scale-105 ${theme === 'dark' ? 'bg-[#B3EFB2] text-[#001A23] border-[#B3EFB2] shadow-[6px_6px_0px_0px_rgba(179,239,178,1)]' : 'bg-[#001A23] text-[#E8F1F2] border-[#001A23] shadow-[6px_6px_0px_0px_rgba(0,26,35,1)]'}`}
               >
-                Start Interview Session
+                Enable Camera & Start
               </button>
             </div>
           )}
 
           {interviewStarted && !interviewComplete && (
-            <div className="space-y-8 animate-fade-in-up">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                {/* Simulated Camera Feed */}
-                <div className={`border-[4px] h-[320px] relative flex flex-col items-center justify-center p-6 ${theme === 'dark' ? 'border-[#B3EFB2] bg-black/60' : 'border-[#001A23] bg-black/10'}`}>
-                  <div className="absolute top-4 left-4 flex items-center gap-2">
-                    <span className="w-4 h-4 bg-red-500 rounded-full animate-ping"></span>
-                    <span className="text-lg font-bold uppercase tracking-wider text-red-500">REC // LIVE FEED</span>
+            <div className="space-y-6 animate-fade-in-up">
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+                
+                {/* RELIABLE CAMERA ATTACHMENT */}
+                <div className={`border-[4px] h-[360px] relative flex flex-col items-center justify-center p-2 overflow-hidden ${theme === 'dark' ? 'border-[#B3EFB2] bg-black/90' : 'border-[#001A23] bg-black/90'}`}>
+                  <div className="absolute top-4 left-4 z-20 flex items-center gap-2">
+                    <span className={`w-4 h-4 rounded-full ${recording ? 'bg-red-500 animate-ping' : 'bg-gray-500'}`}></span>
+                    <span className={`text-lg font-bold uppercase tracking-wider px-2 ${recording ? 'text-red-500 bg-black/70' : 'text-gray-300 bg-black/70'}`}>
+                      {recording ? "REC // LIVE MIC" : "CAMERA STANDBY"}
+                    </span>
                   </div>
-                  <div className="text-center space-y-4">
-                    <svg className={`w-20 h-20 mx-auto opacity-50 ${theme === 'dark' ? 'text-[#B3EFB2]' : 'text-[#001A23]'}`} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>
-                    <p className={`text-xl font-bold uppercase tracking-wider ${theme === 'dark' ? 'text-[#E8F1F2]' : 'text-[#001A23]'}`}>
-                      {recording ? "Analyzing Audio Stream & Cadence..." : "Standby for Response"}
-                    </p>
-                  </div>
+
+                  <video 
+                    ref={(el) => {
+                      if (el && mediaStream && el.srcObject !== mediaStream) {
+                        el.srcObject = mediaStream;
+                      }
+                    }} 
+                    autoPlay 
+                    muted 
+                    playsInline 
+                    className={`w-full h-full object-cover filter ${recording ? 'contrast-125 saturate-125' : 'grayscale opacity-90'} transition-all duration-500`} 
+                  />
+
+                  {recording && (
+                    <div className="absolute bottom-4 left-0 w-full px-4 z-20">
+                      <div className="h-2 w-full bg-black/50 border-2 border-[#B3EFB2] overflow-hidden">
+                        <div className="h-full bg-[#B3EFB2] animate-pulse w-3/4"></div>
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 {/* Question Prompt */}
-                <div className={`border-[4px] h-[320px] p-6 flex flex-col justify-between ${theme === 'dark' ? 'border-[#B3EFB2] bg-[#001A23]' : 'border-[#001A23] bg-[#E8F1F2]'}`}>
-                  <div className="space-y-4">
-                    <span className="text-lg font-bold uppercase tracking-widest opacity-70">Question {currentQuestionIdx + 1} of {interviewQuestions.length}</span>
+                <div className={`border-[4px] h-[360px] p-8 flex flex-col justify-between ${theme === 'dark' ? 'border-[#B3EFB2] bg-[#001A23]' : 'border-[#001A23] bg-[#E8F1F2]'}`}>
+                  <div className="space-y-3">
+                    <span className="text-xl font-bold uppercase tracking-widest opacity-70">Question {currentQuestionIdx + 1} of {questions.length}</span>
                     <h3 className={`text-3xl font-bold leading-snug tracking-wide ${theme === 'dark' ? 'text-[#B3EFB2]' : 'text-[#001A23]'}`}>
-                      "{interviewQuestions[currentQuestionIdx]}"
+                      "{questions[currentQuestionIdx]}"
                     </h3>
                   </div>
 
                   <div className="flex gap-4">
                     {!recording ? (
                       <button 
-                        onClick={() => setRecording(true)}
-                        className={`w-full py-4 font-bold text-xl uppercase tracking-widest border-4 transition-transform hover:-translate-y-1 ${theme === 'dark' ? 'bg-[#B3EFB2] text-[#001A23] border-[#B3EFB2]' : 'bg-[#001A23] text-[#E8F1F2] border-[#001A23]'}`}
+                        onClick={startSpeaking}
+                        className={`w-full py-5 font-bold text-2xl uppercase tracking-widest border-4 transition-transform hover:-translate-y-1 ${theme === 'dark' ? 'bg-[#B3EFB2] text-[#001A23] border-[#B3EFB2]' : 'bg-[#001A23] text-[#E8F1F2] border-[#001A23]'}`}
                       >
                         Start Speaking
                       </button>
                     ) : (
                       <button 
-                        onClick={() => {
-                          setRecording(false);
-                          if (currentQuestionIdx < interviewQuestions.length - 1) {
-                            setCurrentQuestionIdx(prev => prev + 1);
-                          } else {
-                            setInterviewComplete(true);
-                          }
-                        }}
-                        className={`w-full py-4 font-bold text-xl uppercase tracking-widest border-4 animate-pulse bg-red-600 text-white border-black`}
+                        onClick={handleStopRecording}
+                        className={`w-full py-5 font-bold text-2xl uppercase tracking-widest border-4 animate-pulse bg-red-600 text-white border-black`}
                       >
-                        Stop & Submit Answer
+                        Submit Answer
                       </button>
                     )}
                   </div>
                 </div>
               </div>
+
+              {/* LIVE TRANSCRIPTION TERMINAL */}
+              <div className={`border-[4px] p-6 ${theme === 'dark' ? 'border-[#B3EFB2] bg-black/60' : 'border-[#001A23] bg-white/70'}`}>
+                <div className="flex justify-between items-center border-b-2 pb-2 mb-4 opacity-80">
+                  <span className="text-xl font-bold uppercase tracking-widest">LIVE TRANSCRIPTION STREAM</span>
+                  <span className="text-lg">{recording ? "LISTENING..." : "IDLE"}</span>
+                </div>
+                <p className={`text-2xl font-bold tracking-wide min-h-[80px] leading-relaxed ${liveTranscript ? (theme === 'dark' ? 'text-[#B3EFB2]' : 'text-[#001A23]') : 'opacity-40 italic'}`}>
+                  {liveTranscript || (recording ? "Speak now — voice transcription is capturing your input in real time..." : "Press 'Start Speaking' and state your response aloud.")}
+                </p>
+              </div>
+
             </div>
           )}
 
-          {interviewComplete && (
-            <div className="text-center py-16 space-y-8 animate-fade-in-up">
-              <h3 className={`text-5xl font-bold uppercase tracking-widest ${theme === 'dark' ? 'text-[#B3EFB2]' : 'text-[#001A23]'}`}>
-                Assessment Complete!
-              </h3>
-              <p className={`text-2xl max-w-xl mx-auto ${theme === 'dark' ? 'text-[#E8F1F2]' : 'text-[#001A23]'}`}>
-                LiveLogic Score Metric: <span className="font-bold text-3xl underline">94/100 (Optimal Soft-Skill Fit)</span>
-              </p>
-              <button 
-                onClick={() => setCurrentView('jobs')}
-                className={`px-12 py-5 font-bold text-3xl uppercase tracking-widest border-4 transition-all duration-300 hover:scale-105 ${theme === 'dark' ? 'bg-[#B3EFB2] text-[#001A23] border-[#B3EFB2] shadow-[6px_6px_0px_0px_rgba(179,239,178,1)]' : 'bg-[#001A23] text-[#E8F1F2] border-[#001A23] shadow-[6px_6px_0px_0px_rgba(0,26,35,1)]'}`}
-              >
-                Proceed to Job Market Hub
-              </button>
+          {interviewComplete && metrics && (
+            <div className="py-8 space-y-8 animate-fade-in-up">
+              <div className={`p-8 border-[4px] text-center space-y-4 ${theme === 'dark' ? 'border-[#B3EFB2] bg-[#001A23]' : 'border-[#001A23] bg-[#E8F1F2]'}`}>
+                <h3 className={`text-5xl font-bold uppercase tracking-widest ${theme === 'dark' ? 'text-[#B3EFB2]' : 'text-[#001A23]'}`}>
+                  Assessment Complete!
+                </h3>
+                <p className={`text-3xl font-bold ${theme === 'dark' ? 'text-[#E8F1F2]' : 'text-[#001A23]'}`}>
+                  {interviewMode === 'tech' ? 'Technical Competency Score:' : 'Overall Communication Score:'} <span className="underline">{metrics.score}/100</span>
+                </p>
+              </div>
+
+              {/* REAL DATA METRICS BREAKDOWN */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-6 text-center">
+                <div className={`border-[4px] p-6 ${theme === 'dark' ? 'border-[#B3EFB2] bg-[#001A23]' : 'border-[#001A23] bg-[#E8F1F2]'}`}>
+                  <p className="text-xl uppercase opacity-70">Total Words Captured</p>
+                  <p className={`text-5xl font-bold mt-2 ${theme === 'dark' ? 'text-[#B3EFB2]' : 'text-[#001A23]'}`}>{metrics.totalWords}</p>
+                </div>
+                <div className={`border-[4px] p-6 ${theme === 'dark' ? 'border-[#B3EFB2] bg-[#001A23]' : 'border-[#001A23] bg-[#E8F1F2]'}`}>
+                  <p className="text-xl uppercase opacity-70">Keywords Detected</p>
+                  <p className={`text-5xl font-bold mt-2 ${theme === 'dark' ? 'text-[#B3EFB2]' : 'text-[#001A23]'}`}>{metrics.matchedKeywords.length}</p>
+                </div>
+                <div className={`border-[4px] p-6 ${theme === 'dark' ? 'border-[#B3EFB2] bg-[#001A23]' : 'border-[#001A23] bg-[#E8F1F2]'}`}>
+                  <p className="text-xl uppercase opacity-70">Verbal Clarity Metric</p>
+                  <p className={`text-2xl font-bold mt-3 leading-snug ${theme === 'dark' ? 'text-[#B3EFB2]' : 'text-[#001A23]'}`}>{metrics.clarity}</p>
+                </div>
+              </div>
+
+              <div className="text-center">
+                <button 
+                  onClick={() => setCurrentView('jobs')}
+                  className={`px-12 py-5 font-bold text-3xl uppercase tracking-widest border-4 transition-all duration-300 hover:scale-105 ${theme === 'dark' ? 'bg-[#B3EFB2] text-[#001A23] border-[#B3EFB2] shadow-[6px_6px_0px_0px_rgba(179,239,178,1)]' : 'bg-[#001A23] text-[#E8F1F2] border-[#001A23] shadow-[6px_6px_0px_0px_rgba(0,26,35,1)]'}`}
+                >
+                  Proceed to Job Market Hub
+                </button>
+              </div>
             </div>
           )}
 
@@ -786,49 +1011,23 @@ export default function App() {
           }
           
           /* GLOBAL SCROLLBAR STYLES - WEBKIT */
-          .dark ::-webkit-scrollbar {
-            width: 16px;
-          }
-          .dark ::-webkit-scrollbar-track {
-            background: #001A23;
-            border-left: 3px solid #B3EFB2;
-          }
-          .dark ::-webkit-scrollbar-thumb {
-            background: #B3EFB2;
-            border: 3px solid #001A23;
-          }
-          .dark ::-webkit-scrollbar-thumb:hover {
-            background: #E8F1F2;
-          }
+          .dark ::-webkit-scrollbar { width: 16px; }
+          .dark ::-webkit-scrollbar-track { background: #001A23; border-left: 3px solid #B3EFB2; }
+          .dark ::-webkit-scrollbar-thumb { background: #B3EFB2; border: 3px solid #001A23; }
+          .dark ::-webkit-scrollbar-thumb:hover { background: #E8F1F2; }
 
-          .light ::-webkit-scrollbar {
-            width: 16px;
-          }
-          .light ::-webkit-scrollbar-track {
-            background: #E8F1F2;
-            border-left: 3px solid #001A23;
-          }
-          .light ::-webkit-scrollbar-thumb {
-            background: #001A23;
-            border: 3px solid #E8F1F2;
-          }
-          .light ::-webkit-scrollbar-thumb:hover {
-            background: #B3EFB2;
-          }
+          .light ::-webkit-scrollbar { width: 16px; }
+          .light ::-webkit-scrollbar-track { background: #E8F1F2; border-left: 3px solid #001A23; }
+          .light ::-webkit-scrollbar-thumb { background: #001A23; border: 3px solid #E8F1F2; }
+          .light ::-webkit-scrollbar-thumb:hover { background: #B3EFB2; }
           
           /* GLOBAL SCROLLBAR STYLES - FIREFOX */
-          .dark * {
-            scrollbar-width: thin;
-            scrollbar-color: #B3EFB2 #001A23;
-          }
-          .light * {
-            scrollbar-width: thin;
-            scrollbar-color: #001A23 #E8F1F2;
-          }
+          .dark * { scrollbar-width: thin; scrollbar-color: #B3EFB2 #001A23; }
+          .light * { scrollbar-width: thin; scrollbar-color: #001A23 #E8F1F2; }
         `}
       </style>
 
-      {/* Main Wrapper entirely controls its own colors via pure React state */}
+      {/* Main Wrapper */}
       <div className={`min-h-screen font-pixel flex flex-col transition-colors duration-500 relative ${theme} ${theme === 'dark' ? 'bg-[#001A23] text-[#E8F1F2]' : 'bg-[#E8F1F2] text-[#001A23]'}`}>
         
         <div className="fixed inset-0 z-0 pointer-events-auto">
