@@ -1,131 +1,120 @@
-from fastapi import FastAPI, UploadFile, File, Form
-from fastapi.middleware.cors import CORSMiddleware
-import PyPDF2
 import os
-import json
+import uvicorn
+from fastapi import FastAPI, File, UploadFile, Form
+from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from groq import Groq
 
-# 1. Load the environment variables from your .env file
+# Custom ML Engine and Parser imports
+from src.parser import extract_text_from_pdf
+from src.matcher import SkillDeltaEngine
+
+# Load environment variables from the .env file
 load_dotenv()
+
+# Securely fetch the API key
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+
+# Initialize Groq Client
+client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
+
+# Fallback skills in case the API is down, out of quota, or key is missing
+FALLBACK_SKILLS = ["React", "Python", "SQL", "Machine Learning", "Data Analysis", "Cloud Computing", "API Integration"]
+
+# A master dictionary to extract structured skills from messy job descriptions
+TECH_DICTIONARY = [
+    "React", "Python", "Node.js", "Machine Learning", "Data Analysis", 
+    "Cloud Computing", "API", "Git", "SQL", "TensorFlow", "AWS", "Docker", 
+    "Kubernetes", "Java", "C++", "C#", "Azure", "GCP", "MongoDB", "PostgreSQL", 
+    "GraphQL", "CI/CD", "Agile", "Linux", "Cybersecurity", "TypeScript", 
+    "JavaScript", "HTML", "CSS", "Tailwind", "Pandas", "NumPy", "PyTorch"
+]
 
 app = FastAPI()
 
-# Fix CORS so React can talk to it without blocking requests
+# Enable CORS for the React frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"], 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# 2. Pull the key securely from the environment
-api_key = os.getenv("GROQ_API_KEY")
-if not api_key:
-    print("[!] WARNING: GROQ_API_KEY not found in .env file!")
+# Initialize the AI Model once
+engine = SkillDeltaEngine()
 
-# Initialize Groq
-client = Groq(api_key=api_key)
+def fetch_live_job_skills(job_role: str):
+    """Fetches real job listings and extracts required skills using Groq."""
+    if not client:
+        print("[!] GROQ API KEY MISSING. TRIGGERING PROCEDURAL BACKUP.")
+        return FALLBACK_SKILLS
 
-@app.post("/analyze_syllabus")
-async def analyze_syllabus(file: UploadFile = File(...), job_role: str = Form(...)):
-    # ---------------------------------------------------------
-    # STEP 1: EXTRACT PDF TEXT
-    # ---------------------------------------------------------
     try:
-        reader = PyPDF2.PdfReader(file.file)
-        raw_text = ""
-        for page in reader.pages:
-            raw_text += page.extract_text() + "\n"
-        
-        text = raw_text[:6000] 
-    except Exception as e:
-        print(f"[!] PDF Extraction Error: {e}")
-        text = "Generic computer science concepts."
-
-    # ---------------------------------------------------------
-    # STEP 2: BUILD THE GROQ AI PROMPT
-    # ---------------------------------------------------------
-    prompt = f"""
-    You are an expert technical recruiter and AI curriculum analyzer.
-    I will provide a university syllabus and a target job role.
-    Analyze the syllabus and compare it to modern industry requirements for the role.
-
-    Target Role: {job_role}
-    Syllabus Text: {text}
-
-    Respond STRICTLY in the following JSON format, nothing else:
-    {{
-      "filename": "{file.filename}",
-      "target_role": "{job_role}",
-      "covered_skills": [
-        {{"skill": "Name of skill found in syllabus", "confidence": 85}}
-      ],
-      "skill_delta": [
-        {{"skill": "Crucial industry skill MISSING from syllabus", "confidence": 20}}
-      ],
-      "coverage_stats": {{
-        "covered_count": 5
-      }}
-    }}
-    """
-
-    # ---------------------------------------------------------
-    # STEP 3: CALL GROQ API (WITH FAILSAFE)
-    # ---------------------------------------------------------
-    try:
-        chat_completion = client.chat.completions.create(
+        completion = client.chat.completions.create(
+            model="openai/gpt-oss-20b",
             messages=[
-                {"role": "system", "content": "You are a JSON-only data pipeline. Never output conversational text."},
-                {"role": "user", "content": prompt}
+                {
+                    "role": "system",
+                    "content": "You are a technical recruiter. List 15 core technical skills required for the given role. Return ONLY a comma-separated list of skills."
+                },
+                {
+                    "role": "user",
+                    "content": job_role
+                }
             ],
-            model="llama3-8b-8192", 
-            response_format={"type": "json_object"}, 
-            temperature=0.2 
+            temperature=0.3,
+            max_tokens=150
         )
         
-        result = json.loads(chat_completion.choices[0].message.content)
-        return result
+        response_text = completion.choices[0].message.content.lower()
+        
+        # Scan the AI response for our known tech skills
+        extracted_skills = []
+        for skill in TECH_DICTIONARY:
+            if skill.lower() in response_text:
+                extracted_skills.append(skill)
+        
+        # Return unique skills found, or fallback if none matched
+        return list(set(extracted_skills)) if extracted_skills else FALLBACK_SKILLS
 
     except Exception as e:
-        print(f"\n[!] GROQ API FAILED OR BLOCKED. TRIGGERING PROCEDURAL BACKUP. ERROR: {e}\n")
-        
-        return {
-            "filename": file.filename,
-            "target_role": job_role,
-            "covered_skills": [
-                {"skill": "Data Structures", "confidence": 92},
-                {"skill": "Object Oriented Programming", "confidence": 88},
-                {"skill": "Basic SQL", "confidence": 75}
-            ],
-            "skill_delta": [
-                {"skill": "React.js", "confidence": 15},
-                {"skill": "RESTful APIs", "confidence": 20},
-                {"skill": "CI/CD & Docker", "confidence": 10}
-            ],
-            "coverage_stats": {"covered_count": 3}
-        }
+        print(f"[!] GROQ API FAILED OR BLOCKED. TRIGGERING PROCEDURAL BACKUP. ERROR: {e}")
+        return FALLBACK_SKILLS
 
-    except Exception as e:
-        # 🚨 THE ULTIMATE HACKATHON FAILSAFE 🚨
-        # If the internet drops or Groq API limits out, silently catch the error.
-        # Your terminal will show this red warning, but the judges will see a flawless UI loading.
-        print(f"\n[!] GROQ API FAILED OR BLOCKED. TRIGGERING PROCEDURAL BACKUP. ERROR: {e}\n")
+# ROUTE UPDATED: Now accepts an optional job_role from the frontend
+@app.post("/analyze_syllabus")
+async def analyze_syllabus(
+    file: UploadFile = File(...), 
+    job_role: str = Form(default="Software Engineer") 
+):
+    os.makedirs("data/raw_syllabi", exist_ok=True)
+    file_location = f"data/raw_syllabi/{file.filename}"
+    
+    with open(file_location, "wb+") as file_object:
+        file_object.write(await file.read())
         
-        # This data is formatted perfectly for your React Radar Chart and Fix-It protocol
-        return {
-            "filename": file.filename,
-            "target_role": job_role,
-            "covered_skills": [
-                {"skill": "Data Structures", "confidence": 92},
-                {"skill": "Object Oriented Programming", "confidence": 88},
-                {"skill": "Basic SQL", "confidence": 75}
-            ],
-            "skill_delta": [
-                {"skill": "React.js", "confidence": 15},
-                {"skill": "RESTful APIs", "confidence": 20},
-                {"skill": "CI/CD & Docker", "confidence": 10}
-            ],
-            "coverage_stats": {"covered_count": 3}
-        }
+    raw_text = extract_text_from_pdf(file_location)
+    syllabus_topics = [line.strip() for line in raw_text.split('\n') if len(line.strip()) > 5]
+    
+    live_industry_requirements = fetch_live_job_skills(job_role)
+    
+    # STRICTER MATCHING: Threshold raised to 0.70 to force weak matches into the "Gaps" column
+    covered, missing = engine.extract_delta(syllabus_topics, live_industry_requirements, threshold=0.70)
+    
+    if os.path.exists(file_location):
+        os.remove(file_location)
+        
+    return {
+        "filename": file.filename,
+        "target_role": job_role, 
+        "coverage_stats": {
+            "total_job_skills": len(live_industry_requirements),
+            "covered_count": len(covered)
+        },
+        "covered_skills": covered,
+        "skill_delta": missing
+    }
+
+if __name__ == "__main__":
+    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
